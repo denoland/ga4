@@ -3,6 +3,7 @@
 import { ConnInfo } from "https://deno.land/std@0.120.0/http/server.ts";
 import { STATUS_TEXT } from "https://deno.land/std@0.120.0/http/http_status.ts";
 import snakeCase from "https://deno.land/x/case@2.1.1/snakeCase.ts";
+import { getCookies } from "https://deno.land/std@0.143.0/http/cookie.ts";
 
 const GA4_ENDPOINT_URL = "https://www.google-analytics.com/g/collect";
 const SLOW_UPLOAD_THRESHOLD = 1_000;
@@ -40,21 +41,21 @@ export interface Session {
 }
 
 // TODO: potentially remove. traffic type should be set in GA4 interface.
-type TrafficType = "direct" | "organic" | "referral" | "internal" | "custom";
+// type TrafficType = "direct" | "organic" | "referral" | "internal" | "custom";
 
 export interface Page {
   location: string;
   title: string;
   referrer?: string;
   ignoreReferrer?: boolean;
-  trafficType?: TrafficType;
+  trafficType?: string;
   firstVisit?: boolean;
   newToSite?: boolean;
 }
 
 export interface Campaign {
-  source: string;
-  medium: string;
+  source?: string;
+  medium?: string;
   id?: string;
   name?: string;
   content?: string;
@@ -82,6 +83,7 @@ export class GA4Report {
   constructor({ measurementId, request, response, conn }: GA4Init) {
     this.measurementId = measurementId;
     this.client = {
+      id: getClientId(request),
       ip: getClientIp(request, conn),
       language: getClientLanguage(request),
       headers: getClientHeaders(request),
@@ -92,10 +94,10 @@ export class GA4Report {
       location: request.url,
       title: getPageTitle(request, response),
       referrer: getPageReferrer(request),
-      trafficType: getPageTrafficType(request),
-      firstVisit: getFirstVisit(request, response),
+      // trafficType: getPageTrafficType(request),
+      firstVisit: getFirstVisit(request),
     };
-    this.campaign = undefined;
+    this.campaign = getCampaignObject(request);
     this.events = [{ name: "page_view", params: {} }];
   }
 
@@ -166,7 +168,7 @@ export class GA4Report {
     addShortParam(queryParams, "dr", this.page.referrer);
     addShortParam(queryParams, "dt", this.page.title);
     addShortParam(queryParams, "ir", this.page.ignoreReferrer, false);
-    addShortParam(queryParams, "tt", this.page.trafficType, "internal");
+    // addShortParam(queryParams, "tt", this.page.trafficType, "internal");
 
     if (this.event != null) {
       addEventParams(queryParams, this.event);
@@ -230,6 +232,12 @@ export class GA4Report {
   warn(message: unknown) {
     console.warn(`GA4: ${message}`);
   }
+}
+
+// GA will set `client_id` or `cid` as `_ga` cookie.
+function getClientId(request: Request): string | undefined {
+  const cookies = getCookies(request.headers);
+  return cookies._ga ? cookies._ga : undefined;
 }
 
 function getClientIp(request: Request, conn: ConnInfo): string {
@@ -297,7 +305,7 @@ function getPageTitle(request: Request, response: Response): string {
       .map((s) => s.trim()) // Trim leading/trailing whitespace.
       .filter(Boolean) // Remove empty path components.
       .join(" / ") ||
-      "(top level)";
+      "/";
   } else {
     return formatStatus(response).toLowerCase();
   }
@@ -312,40 +320,36 @@ function getPageReferrer(request: Request): string | undefined {
   }
 }
 
+// if _ga cookie exists, then not first time visitor.
 function getFirstVisit(
-  request: Request,
-  response: Response,
+  request: Request
 ): boolean | undefined {
-  if (!/^(HEAD|GET)$/.test(request.method)) {
-    return false;
-  }
-  if (request.headers.get("cookie")) {
-    return false;
-  }
-  if (/immutable/i.test(response.headers.get("cache-control") ?? "")) {
-    return false;
-  }
-  if (response.headers.get("last-modified")) {
-    return request.headers.get("if-modified-since") ? true : false;
-  }
-  if (response.headers.get("etag")) {
-    return request.headers.get("if-none-match") ? true : false;
-  }
-  return undefined; // Undetermined.
+  return getClientId(request) ? false : true;
 }
 
-function getPageTrafficType(
-  request: Request,
-): TrafficType | undefined {
-  const referrer = request.headers.get("referer");
-  if (referrer == null) {
-    return;
+function getCampaignObject(request: Request): Campaign {
+  const url = new URL(request.url);
+  return {
+    name: url.searchParams.get("utm_campaign") || undefined,
+    source: url.searchParams.get("utm_source") || undefined,
+    medium: url.searchParams.get("utm_medium") || undefined,
+    content: url.searchParams.get("utm_content") || undefined,
+    term: url.searchParams.get("utm_term") || undefined
   }
-  if (new URL(request.url).host === new URL(referrer).host) {
-    return "internal";
-  }
-  return "referral";
 }
+
+// function getPageTrafficType(
+//   request: Request,
+// ): TrafficType | undefined {
+//   const referrer = request.headers.get("referer");
+//   if (referrer == null) {
+//     return;
+//   }
+//   if (new URL(request.url).host === new URL(referrer).host) {
+//     return "internal";
+//   }
+//   return "referral";
+// }
 
 export function formatStatus(response: Response): string {
   let { status, statusText } = response;
